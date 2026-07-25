@@ -1,0 +1,423 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Data Quality Violations Report</title>
+<style>
+:root {
+  color-scheme: light;
+  --page: #f9f9f7; --surface: #fcfcfb;
+  --ink: #0b0b0b; --ink-2: #52514e; --muted: #898781;
+  --grid: #e1e0d9; --axis: #c3c2b7; --ring: rgba(11,11,11,0.10);
+  --s1: #2a78d6; --s2: #eb6834;
+  --good: #0ca30c; --good-text: #006300; --critical: #d03b3b; --warning: #fab219;
+  --critical-wash: rgba(208,59,59,0.08);
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    color-scheme: dark;
+    --page: #0d0d0d; --surface: #1a1a19;
+    --ink: #ffffff; --ink-2: #c3c2b7; --muted: #898781;
+    --grid: #2c2c2a; --axis: #383835; --ring: rgba(255,255,255,0.10);
+    --s1: #3987e5; --s2: #d95926;
+    --good: #0ca30c; --good-text: #0ca30c; --critical: #d03b3b;
+    --critical-wash: rgba(208,59,59,0.14);
+  }
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; background: var(--page); color: var(--ink);
+  font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+.wrap { max-width: 1180px; margin: 0 auto; padding: 28px 24px 64px; }
+header h1 { font-size: 24px; margin: 0 0 4px; }
+header .sub { color: var(--ink-2); margin: 0 0 24px; }
+
+.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin-bottom: 28px; }
+.tile {
+  background: var(--surface); border: 1px solid var(--ring); border-radius: 10px;
+  padding: 14px 16px;
+}
+.tile .v { font-size: 21px; font-weight: 650; overflow-wrap: anywhere; }
+.tile .l { color: var(--ink-2); font-size: 12px; margin-top: 2px; }
+.tile.bad .v { color: var(--critical); }
+.tile.ok .v { color: var(--good-text); }
+
+section { background: var(--surface); border: 1px solid var(--ring); border-radius: 12px; padding: 20px 20px 16px; margin-bottom: 24px; }
+section h2 { font-size: 16px; margin: 0 0 2px; }
+section .desc { color: var(--ink-2); font-size: 13px; margin: 0 0 14px; }
+
+.toolbar { display: flex; gap: 10px; align-items: center; margin-bottom: 10px; flex-wrap: wrap; }
+.toolbar input[type=search] {
+  background: var(--page); color: var(--ink); border: 1px solid var(--ring);
+  border-radius: 8px; padding: 6px 10px; font: inherit; width: 240px;
+}
+.toolbar .count { color: var(--muted); font-size: 12px; margin-left: auto; }
+
+.tbl-scroll { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; }
+th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--grid); white-space: nowrap; }
+td.wrapcell { white-space: normal; min-width: 220px; }
+th { color: var(--ink-2); font-size: 12px; font-weight: 600; cursor: pointer; user-select: none; position: sticky; top: 0; background: var(--surface); }
+th .arrow { color: var(--muted); font-size: 10px; }
+td.num, th.num { text-align: right; }
+tr.mismatch td { background: var(--critical-wash); }
+.pill { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; border-radius: 999px; padding: 1px 9px; border: 1px solid var(--ring); }
+.pill.bad { color: var(--critical); }
+.pill.bad::before { content: "\2716"; font-size: 10px; }
+.pill.ok  { color: var(--good-text); }
+.pill.ok::before { content: "\2714"; font-size: 10px; }
+.batch-link { color: var(--s1); cursor: pointer; text-decoration: underline; text-underline-offset: 2px; background: none; border: none; font: inherit; padding: 0; }
+.batch-link:hover { opacity: .8; }
+
+.pager { display: flex; gap: 8px; align-items: center; justify-content: flex-end; padding-top: 10px; color: var(--muted); font-size: 12px; }
+.pager button {
+  background: var(--page); color: var(--ink); border: 1px solid var(--ring);
+  border-radius: 6px; padding: 4px 10px; cursor: pointer; font: inherit;
+}
+.pager button:disabled { opacity: .4; cursor: default; }
+
+.chart-box { position: relative; }
+.chart-box svg { display: block; width: 100%; height: auto; }
+.legend { display: flex; gap: 18px; font-size: 12px; color: var(--ink-2); margin: 4px 0 10px; }
+.legend .key { display: inline-block; width: 14px; height: 3px; border-radius: 2px; vertical-align: middle; margin-right: 6px; }
+.tooltip {
+  position: absolute; pointer-events: none; display: none; z-index: 5;
+  background: var(--surface); border: 1px solid var(--ring); border-radius: 8px;
+  box-shadow: 0 4px 14px rgba(0,0,0,.18); padding: 8px 10px; font-size: 12px; white-space: nowrap;
+}
+.tooltip .t { font-weight: 600; margin-bottom: 3px; }
+.tooltip .row { display: flex; gap: 8px; align-items: center; color: var(--ink-2); }
+.tooltip .dot { width: 8px; height: 8px; border-radius: 50%; }
+
+dialog {
+  border: 1px solid var(--ring); border-radius: 12px; padding: 0;
+  background: var(--surface); color: var(--ink); width: min(960px, 92vw);
+  max-height: 86vh;
+}
+dialog::backdrop { background: rgba(0,0,0,.45); }
+.modal-head { display: flex; align-items: baseline; gap: 14px; padding: 18px 20px 8px; }
+.modal-head h3 { margin: 0; font-size: 16px; }
+.modal-head .meta { color: var(--ink-2); font-size: 13px; }
+.modal-head button { margin-left: auto; background: none; border: none; color: var(--muted); font-size: 20px; cursor: pointer; }
+.modal-body { padding: 0 20px 20px; overflow: auto; max-height: calc(86vh - 70px); }
+footer { color: var(--muted); font-size: 12px; text-align: center; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Data Quality Violations Report</h1>
+    <p class="sub" id="subtitle"></p>
+  </header>
+
+  <div class="tiles" id="tiles"></div>
+
+  <section>
+    <h2>Weekly funding vs invoice totals</h2>
+    <p class="desc">Sum of funding-report payments per week against the invoice "Total Claims" figure. Weeks where the two disagree are marked in red.</p>
+    <div class="legend" id="chart-legend"></div>
+    <div class="chart-box" id="chart"></div>
+  </section>
+
+  <section id="sec-dup-batches">
+    <h2>Duplicate batch violations</h2>
+    <p class="desc">Batches that appear in more than one funding report file. Overpaid is the estimated duplicate payment: everything paid beyond the batch's first submission. Click a batch to see its claims.</p>
+  </section>
+
+  <section id="sec-dup-claims">
+    <h2>Duplicate claim violations</h2>
+    <p class="desc">Claim numbers submitted under more than one batch. Click a batch to see its claims.</p>
+  </section>
+
+  <section id="sec-weekly">
+    <h2>Weekly reconciliation</h2>
+    <p class="desc">Per-directory comparison of funding totals vs invoice totals.</p>
+  </section>
+
+  <section id="sec-anomalies">
+    <h2>Row-level anomalies</h2>
+    <p class="desc">Additional checks: missing identifiers, non-positive payments, and payments exceeding the billed charge.</p>
+  </section>
+
+  <section id="sec-batches">
+    <h2>Batch explorer</h2>
+    <p class="desc">Every batch processed. Click one to inspect its claims.</p>
+  </section>
+
+  <footer id="foot"></footer>
+</div>
+
+<dialog id="batch-modal">
+  <div class="modal-head">
+    <h3 id="modal-title"></h3>
+    <span class="meta" id="modal-meta"></span>
+    <button id="modal-close" aria-label="Close">&#10005;</button>
+  </div>
+  <div class="modal-body"><div id="modal-table"></div></div>
+</dialog>
+
+<script>
+/*__DATA__*/
+
+const fmtMoney = v => {
+  if (v == null) return "—";
+  if (v > -0.005 && v <= 0) v = 0; // values that would render as "-$0.00" show as $0.00
+  return v.toLocaleString("en-US", {style: "currency", currency: "USD"});
+};
+const fmtInt = v => v == null ? "—" : v.toLocaleString("en-US");
+const fmtWeek = w => w ? `${w.slice(0,4)}-${w.slice(4,6)}-${w.slice(6,8)}` : "—";
+const searchText = v => {
+  const s = String(Array.isArray(v) ? v.join(" ") : v).toLowerCase();
+  // yyyymmdd values also match their dashed yyyy-mm-dd form
+  return s + " " + s.replace(/(?<!\d)(\d{4})(\d{2})(\d{2})(?!\d)/g, "$1-$2-$3");
+};
+const esc = s => String(s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+
+/* ---------- summary ---------- */
+const S = DATA.summary;
+document.getElementById("subtitle").textContent =
+  `${fmtInt(S.files)} files across ${fmtInt(S.weeks)} weeks · ${fmtInt(S.claim_rows)} claim rows · generated ${DATA.generated}`;
+document.getElementById("foot").textContent = `Data Quality Violations Detector · generated ${DATA.generated}`;
+
+const tiles = [
+  {v: fmtInt(S.total_violations), l: "Total violations", cls: S.total_violations ? "bad" : "ok"},
+  {v: fmtInt(S.duplicate_batches), l: "Duplicate batches", cls: S.duplicate_batches ? "bad" : "ok"},
+  {v: fmtInt(S.duplicate_claims), l: "Duplicate claims", cls: S.duplicate_claims ? "bad" : "ok"},
+  {v: S.overpaid == null ? "—" : S.overpaid.toLocaleString("en-US", {style: "currency", currency: "USD", maximumFractionDigits: 0}), l: "Estimated overpaid", cls: S.overpaid ? "bad" : "ok"},
+  {v: fmtInt(S.mismatched_weeks), l: "Weeks with total mismatch", cls: S.mismatched_weeks ? "bad" : "ok"},
+  {v: fmtInt(S.batches), l: "Batches processed"},
+  {v: fmtInt(S.files), l: "Files processed"},
+];
+document.getElementById("tiles").innerHTML = tiles.map(t =>
+  `<div class="tile ${t.cls || ""}"><div class="v">${t.v}</div><div class="l">${t.l}</div></div>`).join("");
+
+/* ---------- generic table ---------- */
+function makeTable(host, rows, cols, opts = {}) {
+  const state = {q: "", sortKey: opts.sortKey ?? null, sortDir: opts.sortDir ?? -1, page: 0};
+  const pageSize = opts.pageSize ?? 15;
+
+  const root = document.createElement("div");
+  root.innerHTML = `
+    <div class="toolbar">
+      <input type="search" placeholder="Search…" aria-label="Search table">
+      <span class="count"></span>
+    </div>
+    <div class="tbl-scroll"><table><thead></thead><tbody></tbody></table></div>
+    <div class="pager">
+      <span class="pg-info"></span>
+      <button class="prev">Prev</button><button class="next">Next</button>
+    </div>`;
+  host.appendChild(root);
+  const search = root.querySelector("input");
+  const thead = root.querySelector("thead");
+  const tbody = root.querySelector("tbody");
+
+  search.addEventListener("input", () => { state.q = search.value.toLowerCase(); state.page = 0; render(); });
+  root.querySelector(".prev").addEventListener("click", () => { state.page--; render(); });
+  root.querySelector(".next").addEventListener("click", () => { state.page++; render(); });
+
+  function filtered() {
+    let out = rows;
+    if (state.q) out = out.filter(r => cols.some(c => {
+      const v = r[c.key];
+      return v != null && searchText(v).includes(state.q);
+    }));
+    if (state.sortKey) {
+      const c = cols.find(c => c.key === state.sortKey);
+      out = [...out].sort((a, b) => {
+        let x = a[c.key], y = b[c.key];
+        if (Array.isArray(x)) x = x.length; if (Array.isArray(y)) y = y.length;
+        if (x == null) return 1; if (y == null) return -1;
+        return (x < y ? -1 : x > y ? 1 : 0) * state.sortDir;
+      });
+    }
+    return out;
+  }
+
+  function render() {
+    thead.innerHTML = "<tr>" + cols.map(c => {
+      const arrow = state.sortKey === c.key ? (state.sortDir > 0 ? "▲" : "▼") : "";
+      return `<th class="${c.num ? "num" : ""}" data-key="${c.key}">${c.label} <span class="arrow">${arrow}</span></th>`;
+    }).join("") + "</tr>";
+    thead.querySelectorAll("th").forEach(th => th.addEventListener("click", () => {
+      const k = th.dataset.key;
+      if (state.sortKey === k) state.sortDir *= -1; else { state.sortKey = k; state.sortDir = -1; }
+      render();
+    }));
+
+    const data = filtered();
+    const pages = Math.max(1, Math.ceil(data.length / pageSize));
+    state.page = Math.min(state.page, pages - 1);
+    const slice = data.slice(state.page * pageSize, (state.page + 1) * pageSize);
+
+    tbody.innerHTML = slice.length
+      ? slice.map(r => `<tr class="${opts.rowClass ? opts.rowClass(r) : ""}">` +
+          cols.map(c => `<td class="${c.num ? "num" : ""}${c.wrap ? " wrapcell" : ""}">${c.render ? c.render(r[c.key], r) : esc(r[c.key] ?? "—")}</td>`).join("") +
+        "</tr>").join("")
+      : `<tr><td colspan="${cols.length}" style="color:var(--muted)">No rows.</td></tr>`;
+
+    root.querySelector(".count").textContent = `${fmtInt(data.length)} rows`;
+    root.querySelector(".pg-info").textContent = `Page ${state.page + 1} of ${pages}`;
+    root.querySelector(".prev").disabled = state.page === 0;
+    root.querySelector(".next").disabled = state.page >= pages - 1;
+  }
+  render();
+}
+
+/* ---------- shared cell renderers ---------- */
+const batchLink = id => `<button class="batch-link" data-batch="${esc(id)}">${esc(id)}</button>`;
+const batchList = ids => ids.map(batchLink).join(", ");
+const fileList = fs => fs.map(esc).join("<br>");
+const weekList = ws => ws.map(fmtWeek).join(", ");
+
+document.addEventListener("click", e => {
+  const b = e.target.closest(".batch-link");
+  if (b) openBatch(b.dataset.batch);
+});
+
+/* ---------- tables ---------- */
+makeTable(document.getElementById("sec-dup-batches"), DATA.duplicate_batches, [
+  {key: "batch_id", label: "Batch ID", render: batchLink},
+  {key: "n_files", label: "Files", num: true},
+  {key: "total_rows", label: "Total rows", num: true, render: fmtInt},
+  {key: "total_payment", label: "Total payment", num: true, render: fmtMoney},
+  {key: "overpaid", label: "Overpaid (est.)", num: true, render: fmtMoney},
+  {key: "weeks", label: "Processed weeks", render: weekList, wrap: true},
+  {key: "files", label: "Source files", render: fileList, wrap: true},
+], {sortKey: "overpaid"});
+
+makeTable(document.getElementById("sec-dup-claims"), DATA.duplicate_claims, [
+  {key: "claim_number", label: "Claim ID"},
+  {key: "n_batches", label: "Batches", num: true},
+  {key: "batch_ids", label: "Batch IDs", render: batchList, wrap: true},
+  {key: "occurrences", label: "Occurrences", num: true},
+  {key: "total_payment", label: "Total payment", num: true, render: fmtMoney},
+  {key: "weeks", label: "Weeks", render: weekList, wrap: true},
+  {key: "files", label: "Source files", render: fileList, wrap: true},
+], {sortKey: "total_payment"});
+
+makeTable(document.getElementById("sec-weekly"), DATA.weekly, [
+  {key: "week", label: "Week", render: fmtWeek},
+  {key: "funding_files", label: "Reports", num: true},
+  {key: "batches", label: "Batches", num: true},
+  {key: "claim_rows", label: "Claim rows", num: true, render: fmtInt},
+  {key: "funding_total", label: "Funding total", num: true, render: fmtMoney},
+  {key: "invoice_total", label: "Invoice total", num: true, render: fmtMoney},
+  {key: "delta", label: "Delta", num: true, render: (v, r) =>
+    v == null ? "—" : `<span style="color:${r.mismatch ? "var(--critical)" : "inherit"}">${fmtMoney(v)}</span>`},
+  {key: "mismatch", label: "Status", render: v =>
+    v ? `<span class="pill bad">mismatch</span>` : `<span class="pill ok">reconciled</span>`},
+], {sortKey: "week", sortDir: 1, rowClass: r => r.mismatch ? "mismatch" : "", pageSize: 15});
+
+makeTable(document.getElementById("sec-anomalies"), DATA.anomalies, [
+  {key: "anomaly", label: "Anomaly"},
+  {key: "batch_id", label: "Batch", render: v => v == null ? "—" : batchLink(v)},
+  {key: "claim_number", label: "Claim"},
+  {key: "billed", label: "Billed", num: true, render: fmtMoney},
+  {key: "paid", label: "Paid", num: true, render: fmtMoney},
+  {key: "week", label: "Week", render: fmtWeek},
+  {key: "source_file", label: "Source file"},
+]);
+
+makeTable(document.getElementById("sec-batches"), DATA.batches, [
+  {key: "batch_id", label: "Batch ID", render: batchLink},
+  {key: "rows", label: "Claims", num: true, render: fmtInt},
+  {key: "total_payment", label: "Total payment", num: true, render: fmtMoney},
+  {key: "weeks", label: "Weeks", render: weekList, wrap: true},
+  {key: "files", label: "Source files", render: fileList, wrap: true},
+], {sortKey: "batch_id", sortDir: 1, pageSize: 15});
+
+/* ---------- batch modal ---------- */
+const modal = document.getElementById("batch-modal");
+document.getElementById("modal-close").addEventListener("click", () => modal.close());
+modal.addEventListener("click", e => { if (e.target === modal) modal.close(); });
+
+function openBatch(id) {
+  const raw = DATA.claims_by_batch[id] || [];
+  const rows = raw.map(a => ({claim: a[0], date: a[1], billed: a[2], paid: a[3], plan: a[4], provider: a[5], week: a[6], file: a[7]}));
+  const total = rows.reduce((s, r) => s + (r.paid || 0), 0);
+  document.getElementById("modal-title").textContent = `Batch ${id}`;
+  document.getElementById("modal-meta").textContent =
+    `${fmtInt(rows.length)} claim rows · ${fmtMoney(total)} total payment`;
+  const host = document.getElementById("modal-table");
+  host.innerHTML = "";
+  makeTable(host, rows, [
+    {key: "claim", label: "Claim"},
+    {key: "date", label: "Service date"},
+    {key: "billed", label: "Billed", num: true, render: fmtMoney},
+    {key: "paid", label: "Paid", num: true, render: fmtMoney},
+    {key: "plan", label: "Plan"},
+    {key: "provider", label: "Provider"},
+    {key: "week", label: "Week", render: fmtWeek},
+    {key: "file", label: "Source file"},
+  ], {pageSize: 12});
+  modal.showModal();
+}
+
+/* ---------- chart ---------- */
+(function chart() {
+  const rows = DATA.weekly.filter(r => r.funding_total != null || r.invoice_total != null);
+  if (!rows.length) return;
+  const W = 1120, H = 320, m = {t: 16, r: 16, b: 34, l: 68};
+  const iw = W - m.l - m.r, ih = H - m.t - m.b;
+  const maxY = Math.max(...rows.flatMap(r => [r.funding_total || 0, r.invoice_total || 0])) * 1.05;
+  const x = i => m.l + (rows.length === 1 ? iw / 2 : i * iw / (rows.length - 1));
+  const y = v => m.t + ih - (v / maxY) * ih;
+
+  const ticksY = 4;
+  let grid = "", labels = "";
+  for (let t = 0; t <= ticksY; t++) {
+    const v = maxY * t / ticksY, yy = y(v);
+    grid += `<line x1="${m.l}" y1="${yy}" x2="${W - m.r}" y2="${yy}" stroke="var(--grid)" stroke-width="1"/>`;
+    labels += `<text x="${m.l - 8}" y="${yy + 4}" text-anchor="end" fill="var(--muted)" font-size="11">$${Math.round(v / 1000).toLocaleString()}k</text>`;
+  }
+  const step = Math.max(1, Math.ceil(rows.length / 10));
+  for (let i = 0; i < rows.length; i += step) {
+    labels += `<text x="${x(i)}" y="${H - 12}" text-anchor="middle" fill="var(--muted)" font-size="11">${fmtWeek(rows[i].week)}</text>`;
+  }
+  const path = key => rows.map((r, i) => (r[key] == null ? "" : `${i && rows[i-1][key] != null ? "L" : "M"}${x(i).toFixed(1)},${y(r[key]).toFixed(1)}`)).join("");
+  const marks = rows.map((r, i) => r.mismatch && r.funding_total != null
+    ? `<circle cx="${x(i)}" cy="${y(r.funding_total)}" r="4" fill="var(--critical)" stroke="var(--surface)" stroke-width="2"/>` : "").join("");
+
+  const box = document.getElementById("chart");
+  box.innerHTML = `
+    <svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Weekly funding vs invoice totals">
+      ${grid}
+      <line x1="${m.l}" y1="${m.t + ih}" x2="${W - m.r}" y2="${m.t + ih}" stroke="var(--axis)"/>
+      <path d="${path("funding_total")}" fill="none" stroke="var(--s1)" stroke-width="2"/>
+      <path d="${path("invoice_total")}" fill="none" stroke="var(--s2)" stroke-width="2" stroke-dasharray="6 5"/>
+      ${marks}${labels}
+      <line id="xhair" y1="${m.t}" y2="${m.t + ih}" stroke="var(--axis)" stroke-dasharray="3 3" visibility="hidden"/>
+      <rect id="hit" x="${m.l}" y="${m.t}" width="${iw}" height="${ih}" fill="transparent"/>
+    </svg>
+    <div class="tooltip" id="tip"></div>`;
+  document.getElementById("chart-legend").innerHTML = `
+    <span><span class="key" style="background:var(--s1)"></span>Funding total</span>
+    <span><span class="key" style="background:repeating-linear-gradient(90deg,var(--s2) 0 5px,transparent 5px 9px)"></span>Invoice total (dashed)</span>
+    <span><span class="key" style="background:var(--critical);width:8px;height:8px;border-radius:50%"></span>Mismatch week</span>`;
+
+  const svg = box.querySelector("svg"), tip = document.getElementById("tip"), xh = box.querySelector("#xhair");
+  box.querySelector("#hit").addEventListener("mousemove", e => {
+    const rect = svg.getBoundingClientRect();
+    const sx = (e.clientX - rect.left) * W / rect.width;
+    const i = Math.max(0, Math.min(rows.length - 1, Math.round((sx - m.l) / (iw / (rows.length - 1)))));
+    const r = rows[i];
+    xh.setAttribute("x1", x(i)); xh.setAttribute("x2", x(i)); xh.setAttribute("visibility", "visible");
+    tip.innerHTML = `<div class="t">Week of ${fmtWeek(r.week)}${r.mismatch ? " · ⚠ mismatch" : ""}</div>
+      <div class="row"><span class="dot" style="background:var(--s1)"></span>Funding ${fmtMoney(r.funding_total)}</div>
+      <div class="row"><span class="dot" style="background:var(--s2)"></span>Invoice ${fmtMoney(r.invoice_total)}</div>
+      <div class="row" style="padding-left:16px">Delta ${fmtMoney(r.delta)}</div>`;
+    tip.style.display = "block";
+    const px = x(i) * rect.width / W;
+    tip.style.left = Math.min(px + 14, rect.width - tip.offsetWidth - 4) + "px";
+    tip.style.top = (e.clientY - rect.top - 10) + "px";
+  });
+  box.querySelector("#hit").addEventListener("mouseleave", () => {
+    tip.style.display = "none"; xh.setAttribute("visibility", "hidden");
+  });
+})();
+</script>
+</body>
+</html>

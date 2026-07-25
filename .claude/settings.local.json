@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(/Users/baruch.fuchsmann/dev/bluespine/dqvd/langgraph-env/bin/python -c \"import openpyxl, polars\")",
+      "Bash(python3 -c \"import openpyxl, polars, jinja2\")",
+      "Bash(/Users/baruch.fuchsmann/dev/bluespine/dqvd/.venv/bin/python main.py --input-path ./data --output-path ./output)",
+      "Bash(grep -c 'avoid \"-\\\\$0.00\"' output/report.html)",
+      "Bash(.venv/bin/python -m pytest --version)",
+      "Bash(.venv/bin/python -m unittest discover tests -v)",
+      "Bash(node --test tests/)",
+      "Bash(node --test tests/test_report_template.mjs)",
+      "Bash(.venv/bin/python -m unittest discover tests)",
+      "Bash(.venv/bin/python main.py --input-path ./data --output-path ./output)",
+      "Bash(.venv/bin/python main.py)"
+    ]
+  }
+}
