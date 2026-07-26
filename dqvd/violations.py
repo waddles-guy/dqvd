@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import logging
+
 import polars as pl
+
+log = logging.getLogger(__name__)
 
 # Funding vs invoice weekly totals within a cent are treated as reconciled.
 RECONCILE_TOLERANCE = 0.01
@@ -22,7 +26,7 @@ def detect_duplicate_batches(claims: pl.DataFrame) -> pl.DataFrame:
         )
         .sort("week", "source_file")
     )
-    return (
+    out = (
         per_file.group_by("batch_id")
         .agg(
             pl.col("source_file").alias("files"),
@@ -35,11 +39,18 @@ def detect_duplicate_batches(claims: pl.DataFrame) -> pl.DataFrame:
         .filter(pl.col("n_files") > 1)
         .sort("overpaid", descending=True)
     )
+    log.info("duplicate batches: %d found, %s estimated overpaid",
+             out.height, f"{out['overpaid'].sum() or 0.0:,.2f}")
+    for r in out.iter_rows(named=True):
+        log.debug("  batch %s: %d files across weeks %s, overpaid %s (files: %s)",
+                  r["batch_id"], r["n_files"], r["weeks"],
+                  f"{r['overpaid']:,.2f}", r["files"])
+    return out
 
 
 def detect_duplicate_claims(claims: pl.DataFrame) -> pl.DataFrame:
     """Claim numbers submitted under more than one batch id."""
-    return (
+    out = (
         claims.group_by("claim_number")
         .agg(
             pl.col("batch_id").n_unique().alias("n_batches"),
@@ -52,6 +63,12 @@ def detect_duplicate_claims(claims: pl.DataFrame) -> pl.DataFrame:
         .filter(pl.col("n_batches") > 1)
         .sort("total_payment", descending=True)
     )
+    log.info("duplicate claims: %d found", out.height)
+    for r in out.iter_rows(named=True):
+        log.debug("  claim %s: %d occurrences under batches %s in weeks %s, total payment %s",
+                  r["claim_number"], r["occurrences"], r["batch_ids"], r["weeks"],
+                  f"{r['total_payment']:,.2f}")
+    return out
 
 
 def duplicate_repayments(claims: pl.DataFrame) -> pl.DataFrame:
@@ -93,8 +110,9 @@ def duplicate_repayments(claims: pl.DataFrame) -> pl.DataFrame:
     )
 
     if not batch_weekly.height and not claim_weekly.height:
+        log.info("duplicate repayments: none")
         return pl.DataFrame(schema=schema)
-    return (
+    out = (
         batch_weekly.join(claim_weekly, on="week", how="full", coalesce=True)
         .with_columns(
             pl.col("dup_batch_repaid").fill_null(0.0),
@@ -102,6 +120,15 @@ def duplicate_repayments(claims: pl.DataFrame) -> pl.DataFrame:
         )
         .sort("week")
     )
+    log.info(
+        "duplicate repayments: %d weeks affected, %s from batches + %s from claims",
+        out.height,
+        f"{out['dup_batch_repaid'].sum():,.2f}", f"{out['dup_claim_repaid'].sum():,.2f}",
+    )
+    for r in out.iter_rows(named=True):
+        log.debug("  week %s: batch repayments %s, claim repayments %s",
+                  r["week"], f"{r['dup_batch_repaid']:,.2f}", f"{r['dup_claim_repaid']:,.2f}")
+    return out
 
 
 def weekly_reconciliation(claims: pl.DataFrame, invoices: pl.DataFrame) -> pl.DataFrame:
@@ -121,7 +148,7 @@ def weekly_reconciliation(claims: pl.DataFrame, invoices: pl.DataFrame) -> pl.Da
         pl.len().alias("claim_rows"),
         pl.col("source_file").n_unique().alias("funding_files"),
     )
-    return (
+    out = (
         funding_weekly.join(
             invoices.select(
                 "week", "invoice_number", "total_claims", "carrier_fees",
@@ -152,11 +179,25 @@ def weekly_reconciliation(claims: pl.DataFrame, invoices: pl.DataFrame) -> pl.Da
         )
         .sort("week")
     )
+    mismatched = out.filter(pl.col("mismatch"))
+    log.info(
+        "weekly reconciliation: %d weeks, %d mismatched, total real overpayment %s",
+        out.height, mismatched.height, f"{out['overpayment'].sum() or 0.0:,.2f}",
+    )
+    for r in mismatched.iter_rows(named=True):
+        log.debug(
+            "  week %s MISMATCH: funding=%s invoice=%s delta=%s",
+            r["week"],
+            f"{r['funding_total']:,.2f}" if r["funding_total"] is not None else "—",
+            f"{r['total_claims']:,.2f}" if r["total_claims"] is not None else "—",
+            f"{r['delta']:,.2f}" if r["delta"] is not None else "—",
+        )
+    return out
 
 
 def detect_line_anomalies(claims: pl.DataFrame) -> pl.DataFrame:
     """Row-level oddities: missing keys, non-positive amounts, payment > billed."""
-    return claims.with_columns(
+    out = claims.with_columns(
         pl.when(pl.col("batch_id").is_null() | pl.col("claim_number").is_null())
         .then(pl.lit("missing identifier"))
         .when(pl.col("total_payment_amount") <= 0)
@@ -166,11 +207,19 @@ def detect_line_anomalies(claims: pl.DataFrame) -> pl.DataFrame:
         .otherwise(pl.lit(None))
         .alias("anomaly")
     ).filter(pl.col("anomaly").is_not_null())
+    by_type = {r["anomaly"]: r["n"] for r in
+               out.group_by("anomaly").agg(pl.len().alias("n")).iter_rows(named=True)}
+    log.info("line anomalies: %d found%s", out.height,
+             f" ({', '.join(f'{k}: {v}' for k, v in sorted(by_type.items()))})" if by_type else "")
+    for r in out.iter_rows(named=True):
+        log.debug("  week %s %s: claim=%s batch=%s (%s)",
+                  r["week"], r["source_file"], r["claim_number"], r["batch_id"], r["anomaly"])
+    return out
 
 
 def batch_summaries(claims: pl.DataFrame) -> pl.DataFrame:
     """One row per batch, for the explorer view."""
-    return (
+    out = (
         claims.group_by("batch_id")
         .agg(
             pl.col("week").unique().sort().alias("weeks"),
@@ -180,3 +229,6 @@ def batch_summaries(claims: pl.DataFrame) -> pl.DataFrame:
         )
         .sort("batch_id")
     )
+    log.info("batch summaries: %d batches, %s total payment",
+             out.height, f"{out['total_payment'].sum() or 0.0:,.2f}")
+    return out

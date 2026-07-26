@@ -382,6 +382,21 @@ class LoadDirectoryTests(unittest.TestCase):
         with self.assertRaises(FileNotFoundError):
             load_directory(self.root)
 
+    def test_per_week_summary_is_logged_at_info(self):
+        self._write_week("20260713")
+        write_invoice(self.root / "20260713" / "BS Weekly Bill.xlsx")
+        with self.assertLogs("dqvd.parsing", level="INFO") as cm:
+            load_directory(self.root)
+        self.assertTrue(any("week 20260713: 1 funding reports (1 claim rows), 1 invoice" in m
+                            for m in cm.output))
+        self.assertTrue(any("Found 1 weekly folders" in m for m in cm.output))
+
+    def test_week_without_invoice_logs_warning(self):
+        self._write_week("20260713")
+        with self.assertLogs("dqvd.parsing", level="WARNING") as cm:
+            load_directory(self.root)
+        self.assertTrue(any("week 20260713: no invoice file found" in m for m in cm.output))
+
     def test_week_folders_with_no_files_return_empty_frames_with_schema(self):
         (self.root / "20260713").mkdir()
         claims, invoices = load_directory(self.root)

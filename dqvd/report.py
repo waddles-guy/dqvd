@@ -8,6 +8,7 @@ explorer without a server.
 from __future__ import annotations
 
 import json
+import logging
 from datetime import datetime, timezone
 from importlib import resources
 from pathlib import Path
@@ -16,6 +17,8 @@ import polars as pl
 
 from . import violations as V
 
+log = logging.getLogger(__name__)
+
 
 def _round(v: float | None, digits: int = 2) -> float | None:
     # adding 0.0 normalizes -0.0 to 0.0 so zero deltas never render with a minus sign
@@ -23,6 +26,8 @@ def _round(v: float | None, digits: int = 2) -> float | None:
 
 
 def build_payload(claims: pl.DataFrame, invoices: pl.DataFrame) -> dict:
+    log.info("Building report payload from %d claim rows and %d invoices",
+             claims.height, invoices.height)
     dup_batches = V.detect_duplicate_batches(claims)
     dup_claims = V.detect_duplicate_claims(claims)
     weekly = V.weekly_reconciliation(claims, invoices)
@@ -137,4 +142,12 @@ def render_report(claims: pl.DataFrame, invoices: pl.DataFrame, output_path: Pat
     output_path.mkdir(parents=True, exist_ok=True)
     report_file = output_path / "report.html"
     report_file.write_text(html, encoding="utf-8")
+    log.info(
+        "Rendered report: %d violations, %d mismatched weeks, "
+        "total real overpayment %s (%.1f KB html)",
+        payload["summary"]["total_violations"],
+        payload["summary"]["mismatched_weeks"],
+        f"{payload['summary']['total_overpayment']:,.2f}",
+        len(html) / 1024,
+    )
     return report_file
