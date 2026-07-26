@@ -508,5 +508,50 @@ class BatchSummaryTests(unittest.TestCase):
         self.assertEqual(row["files"], ["f1.xlsx", "f2.xlsx"])
 
 
+class LoggingTests(unittest.TestCase):
+    """The detectors announce their findings at INFO with per-item DEBUG."""
+
+    def test_duplicate_batches_logs_count_and_overpaid(self):
+        claims = claims_df([
+            {"batch_id": "B1", "source_file": "f1.xlsx", "total_payment_amount": 100.0},
+            {"batch_id": "B1", "source_file": "f2.xlsx", "week": "20260720",
+             "total_payment_amount": 100.0},
+        ])
+        with self.assertLogs("dqvd.violations", level="DEBUG") as cm:
+            V.detect_duplicate_batches(claims)
+        self.assertTrue(any("duplicate batches: 1 found" in m and "100.00" in m for m in cm.output))
+        self.assertTrue(any("batch B1" in m for m in cm.output))
+
+    def test_duplicate_claims_logs_findings(self):
+        claims = claims_df([
+            {"claim_number": "C1", "batch_id": "B1"},
+            {"claim_number": "C1", "batch_id": "B2"},
+        ])
+        with self.assertLogs("dqvd.violations", level="DEBUG") as cm:
+            V.detect_duplicate_claims(claims)
+        self.assertTrue(any("duplicate claims: 1 found" in m for m in cm.output))
+        self.assertTrue(any("claim C1" in m for m in cm.output))
+
+    def test_weekly_reconciliation_logs_mismatches(self):
+        with self.assertLogs("dqvd.violations", level="DEBUG") as cm:
+            V.weekly_reconciliation(
+                claims_df([{"total_payment_amount": 80.0}]),
+                invoices_df([{"total_claims": 90.0}]),
+            )
+        self.assertTrue(any("1 mismatched" in m for m in cm.output))
+        self.assertTrue(any("MISMATCH" in m and "20260713" in m for m in cm.output))
+
+    def test_line_anomalies_logs_breakdown_by_type(self):
+        claims = claims_df([
+            {"claim_number": "C1", "total_payment_amount": 0.0},
+            {"claim_number": "C2", "batch_id": None},
+        ])
+        with self.assertLogs("dqvd.violations", level="INFO") as cm:
+            V.detect_line_anomalies(claims)
+        self.assertTrue(any(
+            "line anomalies: 2 found" in m and "missing identifier: 1" in m
+            and "non-positive payment: 1" in m for m in cm.output))
+
+
 if __name__ == "__main__":
     unittest.main()

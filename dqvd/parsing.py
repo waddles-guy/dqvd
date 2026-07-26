@@ -112,7 +112,14 @@ def read_funding_report(path: Path, week: str) -> pl.DataFrame:
             )
     finally:
         wb.close()
-    return pl.DataFrame(records, schema=CLAIM_SCHEMA)
+    frame = pl.DataFrame(records, schema=CLAIM_SCHEMA)
+    log.debug(
+        "week %s: parsed funding report %s: %d claim rows, %d batches, %s total payment",
+        week, path.name, frame.height,
+        frame["batch_id"].n_unique() if frame.height else 0,
+        f"{frame['total_payment_amount'].sum() or 0.0:,.2f}",
+    )
+    return frame
 
 
 def read_invoice(path: Path, week: str) -> pl.DataFrame:
@@ -140,6 +147,13 @@ def read_invoice(path: Path, week: str) -> pl.DataFrame:
         }
     finally:
         wb.close()
+    log.debug(
+        "week %s: parsed invoice %s: number=%s, total claims=%s, total due=%s%s",
+        week, path.name, record["invoice_number"],
+        f"{record['total_claims']:,.2f}" if record["total_claims"] is not None else "—",
+        f"{record['total_amount_due']:,.2f}" if record["total_amount_due"] is not None else "—",
+        " (NEGATIVE BATCH)" if negative_batch else "",
+    )
     return pl.DataFrame([record], schema=INVOICE_SCHEMA)
 
 
@@ -178,15 +192,31 @@ def load_directory(input_path: Path) -> tuple[pl.DataFrame, pl.DataFrame]:
     if not week_dirs:
         raise FileNotFoundError(f"No weekly YYYYMMDD folders found under {input_path}")
 
+    log.info("Found %d weekly folders under %s (%s .. %s)",
+             len(week_dirs), input_path, week_dirs[0].name, week_dirs[-1].name)
+
     for week_dir in week_dirs:
         week = week_dir.name
+        week_funding: list[pl.DataFrame] = []
+        week_invoices: list[pl.DataFrame] = []
         for f in sorted(week_dir.iterdir()):
             if FUNDING_PATTERN.search(f.name):
-                claim_frames.append(read_funding_report(f, week))
+                week_funding.append(read_funding_report(f, week))
             elif INVOICE_PATTERN.match(f.name):
-                invoice_frames.append(read_invoice(f, week))
+                week_invoices.append(read_invoice(f, week))
             elif f.suffix.lower() == ".xlsx":
                 log.warning("Unrecognized xlsx file skipped: %s", f)
+        log.info(
+            "week %s: %d funding reports (%d claim rows), %d invoice%s",
+            week, len(week_funding), sum(fr.height for fr in week_funding),
+            len(week_invoices), "" if len(week_invoices) == 1 else "s",
+        )
+        if not week_invoices:
+            log.warning("week %s: no invoice file found", week)
+        if not week_funding:
+            log.warning("week %s: no funding report files found", week)
+        claim_frames.extend(week_funding)
+        invoice_frames.extend(week_invoices)
 
     claims = pl.concat(claim_frames) if claim_frames else pl.DataFrame(schema=CLAIM_SCHEMA)
     invoices = pl.concat(invoice_frames) if invoice_frames else pl.DataFrame(schema=INVOICE_SCHEMA)
