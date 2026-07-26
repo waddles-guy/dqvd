@@ -54,8 +54,66 @@ def detect_duplicate_claims(claims: pl.DataFrame) -> pl.DataFrame:
     )
 
 
+def duplicate_repayments(claims: pl.DataFrame) -> pl.DataFrame:
+    """Dollars re-paid per week because of duplicates, attributed to the week
+    of the re-occurrence (the first payment is the legitimate one).
+
+    - dup_batch_repaid: full payment of every duplicated batch's second and
+      later files.
+    - dup_claim_repaid: payment of every second and later occurrence of a
+      claim submitted under more than one batch — excluding rows that sit in
+      a duplicated batch's re-submitted file, which are already counted above.
+    """
+    schema = {"week": pl.Utf8, "dup_batch_repaid": pl.Float64, "dup_claim_repaid": pl.Float64}
+    if claims.height == 0:
+        return pl.DataFrame(schema=schema)
+
+    per_file = (
+        claims.group_by("batch_id", "source_file", "week")
+        .agg(pl.col("total_payment_amount").sum().alias("payment"))
+        .sort("week", "source_file")
+        .with_columns(pl.int_range(pl.len()).over("batch_id").alias("occ"))
+    )
+    dup_files = per_file.filter(pl.col("occ") > 0)
+    batch_weekly = dup_files.group_by("week").agg(
+        pl.col("payment").sum().alias("dup_batch_repaid")
+    )
+
+    claim_repays = (
+        claims.sort("week", "source_file")
+        .with_columns(
+            pl.col("batch_id").n_unique().over("claim_number").alias("n_batches"),
+            pl.int_range(pl.len()).over("claim_number").alias("occ"),
+        )
+        .filter((pl.col("n_batches") > 1) & (pl.col("occ") > 0))
+        .join(dup_files.select("batch_id", "source_file"), on=["batch_id", "source_file"], how="anti")
+    )
+    claim_weekly = claim_repays.group_by("week").agg(
+        pl.col("total_payment_amount").sum().alias("dup_claim_repaid")
+    )
+
+    if not batch_weekly.height and not claim_weekly.height:
+        return pl.DataFrame(schema=schema)
+    return (
+        batch_weekly.join(claim_weekly, on="week", how="full", coalesce=True)
+        .with_columns(
+            pl.col("dup_batch_repaid").fill_null(0.0),
+            pl.col("dup_claim_repaid").fill_null(0.0),
+        )
+        .sort("week")
+    )
+
+
 def weekly_reconciliation(claims: pl.DataFrame, invoices: pl.DataFrame) -> pl.DataFrame:
-    """Per-week funding totals vs invoice totals, with the difference."""
+    """Per-week funding totals vs invoice totals, with the difference and the
+    real overpayment.
+
+    delta only measures disagreement between the week's own documents; the
+    invoice includes any duplicated amounts, so duplicates never show up in
+    it. overpayment adds them back: delta + duplicate repayments, i.e. what
+    was paid beyond what the week legitimately owed. For weeks missing an
+    invoice (null delta) it counts the duplicate repayments alone.
+    """
     funding_weekly = claims.group_by("week").agg(
         pl.col("total_payment_amount").sum().alias("funding_total"),
         pl.col("gross_billable_charge").sum().alias("billed_total"),
@@ -73,7 +131,10 @@ def weekly_reconciliation(claims: pl.DataFrame, invoices: pl.DataFrame) -> pl.Da
             how="full",
             coalesce=True,
         )
+        .join(duplicate_repayments(claims), on="week", how="left")
         .with_columns(
+            pl.col("dup_batch_repaid").fill_null(0.0),
+            pl.col("dup_claim_repaid").fill_null(0.0),
             (pl.col("funding_total") - pl.col("total_claims")).alias("delta"),
             (
                 (pl.col("funding_total") - pl.col("total_claims")).abs()
@@ -81,6 +142,13 @@ def weekly_reconciliation(claims: pl.DataFrame, invoices: pl.DataFrame) -> pl.Da
             )
             .fill_null(True)
             .alias("mismatch"),
+        )
+        .with_columns(
+            (
+                (pl.col("funding_total") - pl.col("total_claims")).fill_null(0.0)
+                + pl.col("dup_batch_repaid")
+                + pl.col("dup_claim_repaid")
+            ).alias("overpayment")
         )
         .sort("week")
     )

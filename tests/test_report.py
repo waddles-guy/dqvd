@@ -131,6 +131,33 @@ class PayloadDeltaTests(unittest.TestCase):
         )
         self.assertEqual(self.week_deltas(payload)["20260713"], 10.0)
 
+    def test_weekly_payload_includes_duplicate_and_overpayment_fields(self):
+        payload = build_payload(
+            _claims([
+                {"batch_id": "B1", "claim_number": "C1", "week": "20260706",
+                 "source_file": "f1.xlsx", "total_payment_amount": 100.0},
+                {"batch_id": "B1", "claim_number": "C1b", "week": "20260713",
+                 "source_file": "f2.xlsx", "total_payment_amount": 100.0},
+            ]),
+            _invoices([
+                {"week": "20260706", "total_claims": 100.0, "source_file": "i1.xlsx"},
+                {"week": "20260713", "total_claims": 100.0, "source_file": "i2.xlsx"},
+            ]),
+        )
+        weeks = {w["week"]: w for w in payload["weekly"]}
+        self.assertEqual(weeks["20260706"]["dup_repaid"], 0.0)
+        self.assertEqual(weeks["20260706"]["overpayment"], 0.0)
+        self.assertEqual(weeks["20260713"]["dup_repaid"], 100.0)
+        self.assertEqual(weeks["20260713"]["overpayment"], 100.0)
+        self.assertEqual(payload["summary"]["total_overpayment"], 100.0)
+
+    def test_total_overpayment_zero_for_clean_data(self):
+        payload = build_payload(
+            _claims([{"total_payment_amount": 100.0}]),
+            _invoices([{"total_claims": 100.0}]),
+        )
+        self.assertEqual(payload["summary"]["total_overpayment"], 0.0)
+
     def test_week_missing_invoice_has_null_delta(self):
         payload = build_payload(
             _claims([{"total_payment_amount": 100.0}]),

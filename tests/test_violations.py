@@ -261,6 +261,167 @@ class WeeklyReconciliationTests(unittest.TestCase):
         self.assertEqual(out.height, 1)
 
 
+class DuplicateRepaymentTests(unittest.TestCase):
+    def repayments(self, rows: list[dict]) -> dict[str, tuple[float, float]]:
+        out = V.duplicate_repayments(claims_df(rows))
+        return {
+            r["week"]: (r["dup_batch_repaid"], r["dup_claim_repaid"])
+            for r in out.iter_rows(named=True)
+        }
+
+    def test_no_duplicates_yields_empty(self):
+        self.assertEqual(self.repayments([
+            {"batch_id": "B1", "claim_number": "C1"},
+            {"batch_id": "B2", "claim_number": "C2"},
+        ]), {})
+
+    def test_empty_claims_yields_empty_typed_frame(self):
+        out = V.duplicate_repayments(claims_df([]).clear())
+        self.assertEqual(out.height, 0)
+        self.assertIn("dup_batch_repaid", out.columns)
+
+    def test_batch_repayment_attributed_to_reoccurrence_week_only(self):
+        rep = self.repayments([
+            {"batch_id": "B1", "week": "20260706", "source_file": "f1.xlsx", "total_payment_amount": 100.0},
+            {"batch_id": "B1", "week": "20260713", "source_file": "f2.xlsx", "total_payment_amount": 100.0},
+        ])
+        self.assertNotIn("20260706", rep)  # first payment is legitimate
+        self.assertEqual(rep["20260713"], (100.0, 0.0))
+
+    def test_third_occurrence_also_counted_in_its_own_week(self):
+        rep = self.repayments([
+            {"batch_id": "B1", "week": "20260706", "source_file": "f1.xlsx", "total_payment_amount": 100.0},
+            {"batch_id": "B1", "week": "20260713", "source_file": "f2.xlsx", "total_payment_amount": 60.0},
+            {"batch_id": "B1", "week": "20260720", "source_file": "f3.xlsx", "total_payment_amount": 40.0},
+        ])
+        self.assertEqual(rep["20260713"], (60.0, 0.0))
+        self.assertEqual(rep["20260720"], (40.0, 0.0))
+
+    def test_claim_repayment_attributed_to_later_week(self):
+        rep = self.repayments([
+            {"claim_number": "C1", "batch_id": "B1", "week": "20260706",
+             "source_file": "f1.xlsx", "total_payment_amount": 50.0},
+            {"claim_number": "C1", "batch_id": "B2", "week": "20260713",
+             "source_file": "f2.xlsx", "total_payment_amount": 55.0},
+        ])
+        self.assertNotIn("20260706", rep)
+        self.assertEqual(rep["20260713"], (0.0, 55.0))
+
+    def test_claim_repeated_within_same_batch_not_counted(self):
+        self.assertEqual(self.repayments([
+            {"claim_number": "C1", "batch_id": "B1", "total_payment_amount": 50.0},
+            {"claim_number": "C1", "batch_id": "B1", "total_payment_amount": 50.0},
+        ]), {})
+
+    def test_claim_inside_duplicated_batch_file_not_double_counted(self):
+        # Batch B1 is re-submitted in week 2 (f2.xlsx). Claim C1 also appears
+        # there under B1 after first appearing under B9 — its dollars are part
+        # of the batch repayment and must not be counted again as a claim one.
+        rep = self.repayments([
+            {"claim_number": "C1", "batch_id": "B9", "week": "20260629",
+             "source_file": "f0.xlsx", "total_payment_amount": 10.0},
+            {"claim_number": "C2", "batch_id": "B1", "week": "20260706",
+             "source_file": "f1.xlsx", "total_payment_amount": 100.0},
+            {"claim_number": "C1", "batch_id": "B1", "week": "20260713",
+             "source_file": "f2.xlsx", "total_payment_amount": 10.0},
+            {"claim_number": "C2", "batch_id": "B1", "week": "20260713",
+             "source_file": "f2.xlsx", "total_payment_amount": 100.0},
+        ])
+        self.assertEqual(rep["20260713"], (110.0, 0.0))  # batch only, no claim part
+
+    def test_batch_and_claim_repayments_in_same_week_are_separate(self):
+        rep = self.repayments([
+            {"batch_id": "B1", "claim_number": "C1", "week": "20260706",
+             "source_file": "f1.xlsx", "total_payment_amount": 100.0},
+            {"batch_id": "B1", "claim_number": "C1b", "week": "20260713",
+             "source_file": "f2.xlsx", "total_payment_amount": 100.0},
+            {"claim_number": "C9", "batch_id": "B8", "week": "20260706",
+             "source_file": "f1.xlsx", "total_payment_amount": 7.0},
+            {"claim_number": "C9", "batch_id": "B7", "week": "20260713",
+             "source_file": "f3.xlsx", "total_payment_amount": 7.0},
+        ])
+        self.assertEqual(rep["20260713"], (100.0, 7.0))
+
+
+class WeeklyOverpaymentTests(unittest.TestCase):
+    def week_row(self, claims_rows, invoices_rows, week="20260713"):
+        out = V.weekly_reconciliation(claims_df(claims_rows), invoices_df(invoices_rows))
+        return out.filter(pl.col("week") == week).row(0, named=True)
+
+    def test_clean_week_has_zero_overpayment(self):
+        row = self.week_row([{"total_payment_amount": 80.0}], [{"total_claims": 80.0}])
+        self.assertEqual(row["overpayment"], 0.0)
+        self.assertEqual(row["dup_batch_repaid"], 0.0)
+        self.assertEqual(row["dup_claim_repaid"], 0.0)
+
+    def test_overpayment_is_delta_plus_duplicates(self):
+        # Week 2: invoice includes the re-submitted batch (100), funding also
+        # paid 5 more than invoiced -> overpayment = 5 + 100.
+        claims = [
+            {"batch_id": "B1", "claim_number": "C1", "week": "20260706",
+             "source_file": "f1.xlsx", "total_payment_amount": 100.0},
+            {"batch_id": "B1", "claim_number": "C1b", "week": "20260713",
+             "source_file": "f2.xlsx", "total_payment_amount": 100.0},
+            {"batch_id": "B2", "claim_number": "C2", "week": "20260713",
+             "source_file": "f3.xlsx", "total_payment_amount": 105.0},
+        ]
+        invoices = [
+            {"week": "20260706", "total_claims": 100.0, "source_file": "i1.xlsx"},
+            {"week": "20260713", "total_claims": 200.0, "source_file": "i2.xlsx",
+             "invoice_number": "INV2"},
+        ]
+        row = self.week_row(claims, invoices)
+        self.assertEqual(row["delta"], 5.0)
+        self.assertEqual(row["dup_batch_repaid"], 100.0)
+        self.assertEqual(row["overpayment"], 105.0)
+        first = self.week_row(claims, invoices, week="20260706")
+        self.assertEqual(first["overpayment"], 0.0)
+
+    def test_duplicates_reconciled_week_still_shows_overpayment(self):
+        # invoice matches funding exactly (duplicate included): mismatch is
+        # False but the real overpayment is the duplicate amount.
+        claims = [
+            {"batch_id": "B1", "claim_number": "C1", "week": "20260706",
+             "source_file": "f1.xlsx", "total_payment_amount": 100.0},
+            {"batch_id": "B1", "claim_number": "C1b", "week": "20260713",
+             "source_file": "f2.xlsx", "total_payment_amount": 100.0},
+        ]
+        invoices = [
+            {"week": "20260706", "total_claims": 100.0, "source_file": "i1.xlsx"},
+            {"week": "20260713", "total_claims": 100.0, "source_file": "i2.xlsx"},
+        ]
+        row = self.week_row(claims, invoices)
+        self.assertFalse(row["mismatch"])
+        self.assertEqual(row["overpayment"], 100.0)
+
+    def test_negative_delta_offsets_duplicates_in_the_sum(self):
+        claims = [
+            {"batch_id": "B1", "claim_number": "C1", "week": "20260706",
+             "source_file": "f1.xlsx", "total_payment_amount": 100.0},
+            {"batch_id": "B1", "claim_number": "C1b", "week": "20260713",
+             "source_file": "f2.xlsx", "total_payment_amount": 100.0},
+        ]
+        invoices = [
+            {"week": "20260706", "total_claims": 100.0, "source_file": "i1.xlsx"},
+            {"week": "20260713", "total_claims": 130.0, "source_file": "i2.xlsx"},
+        ]
+        row = self.week_row(claims, invoices)
+        self.assertEqual(row["delta"], -30.0)
+        self.assertEqual(row["overpayment"], 70.0)  # -30 + 100
+
+    def test_missing_invoice_counts_duplicates_alone(self):
+        claims = [
+            {"batch_id": "B1", "claim_number": "C1", "week": "20260706",
+             "source_file": "f1.xlsx", "total_payment_amount": 100.0},
+            {"batch_id": "B1", "claim_number": "C1b", "week": "20260713",
+             "source_file": "f2.xlsx", "total_payment_amount": 100.0},
+        ]
+        invoices = [{"week": "20260706", "total_claims": 100.0}]
+        row = self.week_row(claims, invoices)
+        self.assertIsNone(row["delta"])
+        self.assertEqual(row["overpayment"], 100.0)
+
+
 class LineAnomalyTests(unittest.TestCase):
     def anomalies(self, rows: list[dict]) -> list[str]:
         return V.detect_line_anomalies(claims_df(rows))["anomaly"].to_list()

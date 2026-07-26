@@ -57,6 +57,7 @@ def build_payload(claims: pl.DataFrame, invoices: pl.DataFrame) -> dict:
             "files": int(total_files),
             "claim_rows": claims.height,
             "overpaid": _round(float(dup_batches["overpaid"].sum()) if dup_batches.height else 0.0),
+            "total_overpayment": _round(float(weekly["overpayment"].sum()) if weekly.height else 0.0),
             "anomalies": anomalies.height,
         },
         "duplicate_batches": [
@@ -93,6 +94,8 @@ def build_payload(claims: pl.DataFrame, invoices: pl.DataFrame) -> dict:
                 "invoice_total": _round(r["total_claims"]),
                 "invoice_due": _round(r["total_amount_due"]),
                 "delta": _round(r["delta"]),
+                "dup_repaid": _round(r["dup_batch_repaid"] + r["dup_claim_repaid"]),
+                "overpayment": _round(r["overpayment"]),
                 "mismatch": bool(r["mismatch"]),
             }
             for r in weekly.iter_rows(named=True)

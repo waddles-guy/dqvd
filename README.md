@@ -16,6 +16,12 @@ report.
 - **Weekly reconciliation** — per-week comparison of the summed funding-report
   payments against the invoice "Total Claims" figure, flagging any mismatch
   beyond one cent.
+- **Real overpayment per week** — the delta above only catches disagreement
+  between a week's own documents; invoices include duplicated amounts, so
+  duplicates never appear in it. Each week therefore also gets a real
+  overpayment figure: delta + duplicate-batch repayments + duplicate-claim
+  repayments attributed to that week (first occurrences count as legitimate,
+  and dollars inside a re-submitted batch file are never double-counted).
 - **Row-level anomalies** (bonus) — missing identifiers, non-positive
   payments, and payments exceeding the billed charge.
 
@@ -50,6 +56,13 @@ Options:
 | `--input-path` | `./data` | Folder containing the weekly `YYYYMMDD` subfolders |
 | `--output-path` | `./output` | Folder where `report.html` is written |
 | `-v` / `--verbose` | off | Debug logging |
+
+## Tests
+
+```bash
+python -m unittest discover tests            # Python suite
+node --test tests/test_report_template.mjs   # JS helpers inside the report template
+```
 
 ## Project structure
 
