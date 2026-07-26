@@ -133,7 +133,7 @@ footer { color: var(--muted); font-size: 12px; text-align: center; }
 
   <section id="sec-weekly">
     <h2>Weekly reconciliation</h2>
-    <p class="desc">Per-directory comparison of funding totals vs invoice totals.</p>
+    <p class="desc">Per-directory comparison of funding totals vs invoice totals. Delta is the disagreement between the week's own documents; Real overpayment adds the duplicate amounts the invoice wrongly includes (delta + duplicates repaid that week).</p>
   </section>
 
   <section id="sec-anomalies">
@@ -186,6 +186,7 @@ const tiles = [
   {v: fmtInt(S.duplicate_batches), l: "Duplicate batches", cls: S.duplicate_batches ? "bad" : "ok"},
   {v: fmtInt(S.duplicate_claims), l: "Duplicate claims", cls: S.duplicate_claims ? "bad" : "ok"},
   {v: S.overpaid == null ? "—" : S.overpaid.toLocaleString("en-US", {style: "currency", currency: "USD", maximumFractionDigits: 0}), l: "Estimated overpaid", cls: S.overpaid ? "bad" : "ok"},
+  {v: S.total_overpayment == null ? "—" : S.total_overpayment.toLocaleString("en-US", {style: "currency", currency: "USD", maximumFractionDigits: 0}), l: "Real overpayment (all causes)", cls: S.total_overpayment > 0.01 ? "bad" : "ok"},
   {v: fmtInt(S.mismatched_weeks), l: "Weeks with total mismatch", cls: S.mismatched_weeks ? "bad" : "ok"},
   {v: fmtInt(S.batches), l: "Batches processed"},
   {v: fmtInt(S.files), l: "Files processed"},
@@ -307,6 +308,10 @@ makeTable(document.getElementById("sec-weekly"), DATA.weekly, [
   {key: "invoice_total", label: "Invoice total", num: true, render: fmtMoney},
   {key: "delta", label: "Delta", num: true, render: (v, r) =>
     v == null ? "—" : `<span style="color:${r.mismatch ? "var(--critical)" : "inherit"}">${fmtMoney(v)}</span>`},
+  {key: "dup_repaid", label: "Duplicates repaid", num: true, render: v =>
+    v > 0.005 ? `<span style="color:var(--warning)">${fmtMoney(v)}</span>` : fmtMoney(v)},
+  {key: "overpayment", label: "Real overpayment", num: true, render: v =>
+    v > 0.01 ? `<span style="color:var(--critical)">${fmtMoney(v)}</span>` : fmtMoney(v)},
   {key: "mismatch", label: "Status", render: v =>
     v ? `<span class="pill bad">mismatch</span>` : `<span class="pill ok">reconciled</span>`},
 ], {sortKey: "week", sortDir: 1, rowClass: r => r.mismatch ? "mismatch" : "", pageSize: 15});
@@ -380,6 +385,8 @@ function openBatch(id) {
   const path = key => rows.map((r, i) => (r[key] == null ? "" : `${i && rows[i-1][key] != null ? "L" : "M"}${x(i).toFixed(1)},${y(r[key]).toFixed(1)}`)).join("");
   const marks = rows.map((r, i) => r.mismatch && r.funding_total != null
     ? `<circle cx="${x(i)}" cy="${y(r.funding_total)}" r="4" fill="var(--critical)" stroke="var(--surface)" stroke-width="2"/>` : "").join("");
+  const dupMarks = rows.map((r, i) => r.dup_repaid > 0.005 && r.funding_total != null
+    ? `<circle cx="${x(i)}" cy="${y(r.funding_total)}" r="4" fill="var(--warning)" stroke="var(--surface)" stroke-width="2"/>` : "").join("");
 
   const box = document.getElementById("chart");
   box.innerHTML = `
@@ -388,7 +395,7 @@ function openBatch(id) {
       <line x1="${m.l}" y1="${m.t + ih}" x2="${W - m.r}" y2="${m.t + ih}" stroke="var(--axis)"/>
       <path d="${path("funding_total")}" fill="none" stroke="var(--s1)" stroke-width="2"/>
       <path d="${path("invoice_total")}" fill="none" stroke="var(--s2)" stroke-width="2" stroke-dasharray="6 5"/>
-      ${marks}${labels}
+      ${dupMarks}${marks}${labels}
       <line id="xhair" y1="${m.t}" y2="${m.t + ih}" stroke="var(--axis)" stroke-dasharray="3 3" visibility="hidden"/>
       <rect id="hit" x="${m.l}" y="${m.t}" width="${iw}" height="${ih}" fill="transparent"/>
     </svg>
@@ -396,7 +403,8 @@ function openBatch(id) {
   document.getElementById("chart-legend").innerHTML = `
     <span><span class="key" style="background:var(--s1)"></span>Funding total</span>
     <span><span class="key" style="background:repeating-linear-gradient(90deg,var(--s2) 0 5px,transparent 5px 9px)"></span>Invoice total (dashed)</span>
-    <span><span class="key" style="background:var(--critical);width:8px;height:8px;border-radius:50%"></span>Mismatch week</span>`;
+    <span><span class="key" style="background:var(--critical);width:8px;height:8px;border-radius:50%"></span>Mismatch week</span>
+    <span><span class="key" style="background:var(--warning);width:8px;height:8px;border-radius:50%"></span>Duplicate repayment week</span>`;
 
   const svg = box.querySelector("svg"), tip = document.getElementById("tip"), xh = box.querySelector("#xhair");
   box.querySelector("#hit").addEventListener("mousemove", e => {
@@ -408,7 +416,9 @@ function openBatch(id) {
     tip.innerHTML = `<div class="t">Week of ${fmtWeek(r.week)}${r.mismatch ? " · ⚠ mismatch" : ""}</div>
       <div class="row"><span class="dot" style="background:var(--s1)"></span>Funding ${fmtMoney(r.funding_total)}</div>
       <div class="row"><span class="dot" style="background:var(--s2)"></span>Invoice ${fmtMoney(r.invoice_total)}</div>
-      <div class="row" style="padding-left:16px">Delta ${fmtMoney(r.delta)}</div>`;
+      <div class="row" style="padding-left:16px">Delta ${fmtMoney(r.delta)}</div>
+      <div class="row" style="padding-left:16px">Duplicates repaid ${fmtMoney(r.dup_repaid)}</div>
+      <div class="row" style="padding-left:16px">Real overpayment ${fmtMoney(r.overpayment)}</div>`;
     tip.style.display = "block";
     const px = x(i) * rect.width / W;
     tip.style.left = Math.min(px + 14, rect.width - tip.offsetWidth - 4) + "px";

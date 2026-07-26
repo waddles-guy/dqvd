@@ -28,7 +28,7 @@ data/                          (input)
             │                 claims    (one row per claim line)
             │                 invoices  (one row per weekly invoice)
             ▼
-   dqvd/violations.py   five aggregation functions that find the problems
+   dqvd/violations.py   six aggregation functions that find the problems
             │
             ▼
    dqvd/report.py       converts results to one big JSON dict ("payload")
@@ -159,7 +159,7 @@ pl.when(cond1).then(value1).when(cond2).then(value2).otherwise(default)
 
 A vectorized if/elif/else evaluated row by row. First matching branch wins —
 so the **order of the branches is a precedence rule** (this matters in
-`detect_line_anomalies`, see §5.4).
+`detect_line_anomalies`, see §5.5).
 
 ### 3.6 Getting data out
 
@@ -386,9 +386,61 @@ Step 3 — compute the verdict:
   falsy — the week would look fine. `fill_null(True)` says *a week where we
   can't even compare is by definition a mismatch*.
 
+**Step 4 — real overpayment.** `delta` only measures whether the week's two
+documents agree *with each other* — and since the invoice includes any
+duplicated amounts (verified against the real data: in every duplicate week
+the invoice equals the raw funding sum to the cent), duplicates never appear
+in `delta`. So the reconciliation also joins in `duplicate_repayments` (§5.4)
+and computes:
+
+```
+overpayment = delta (null treated as 0) + dup_batch_repaid + dup_claim_repaid
+```
+
+This is the week's *real* overpayment: what was paid beyond what the week
+legitimately owed, from all detected causes. Note it is **signed** — a week
+can have duplicates and a negative delta partially offsetting them, which is
+why the report shows the components separately. For a week with no invoice,
+`delta` is null and `overpayment` counts the duplicate repayments alone.
+
 Sorted by week for the report's chart and table.
 
-### 5.4 `detect_line_anomalies(claims)`
+### 5.4 `duplicate_repayments(claims)`
+
+**Question:** how many dollars were re-paid in each week because of
+duplicates — attributed to the week of the *re-occurrence* (the first payment
+is the legitimate one)?
+
+Two components, returned as one row per affected week:
+
+- **`dup_batch_repaid`** — reuses the per-(batch, file) aggregation idea from
+  §5.1, but instead of `n_files > 1` it numbers each batch's files in
+  week order with a **window expression**:
+
+  ```python
+  .with_columns(pl.int_range(pl.len()).over("batch_id").alias("occ"))
+  ```
+
+  `pl.int_range(pl.len())` generates 0, 1, 2, … and `.over("batch_id")`
+  restarts the count per batch (rows keep the frame's current order, which is
+  why the frame is sorted by week/file first). Rows with `occ > 0` are the
+  re-submitted files; their full payment is summed into their own week.
+
+- **`dup_claim_repaid`** — the same occurrence-numbering trick applied to raw
+  claim rows, per `claim_number`, combined with
+  `pl.col("batch_id").n_unique().over("claim_number")` so only claims spanning
+  more than one batch qualify (a claim repeated inside one batch is the
+  batch's problem, not a duplicate claim). Rows with `n_batches > 1` and
+  `occ > 0` are re-payments.
+
+  **Double-counting guard:** a duplicate claim's later occurrence could sit
+  inside a duplicated batch's re-submitted file — its dollars would then
+  already be inside `dup_batch_repaid`. An **anti-join** (keep rows that do
+  *not* match) against the set of re-submitted (batch, file) pairs removes
+  exactly those rows. The current data has no such overlap, but the guard
+  makes a future one safe.
+
+### 5.5 `detect_line_anomalies(claims)`
 
 Row-level sanity checks via a `when/then` chain — remember, first match wins,
 so this is a **precedence ladder**:
@@ -402,7 +454,7 @@ so this is a **precedence ladder**:
 the original claim rows plus an `anomaly` label column. A row with several
 problems gets only its highest-precedence label.
 
-### 5.5 `batch_summaries(claims)`
+### 5.6 `batch_summaries(claims)`
 
 Not a violation detector — it feeds the report's "Batch explorer": one row per
 batch with its unique sorted weeks and files, row count, and payment total,
@@ -438,7 +490,9 @@ through `_round`. Sections of the payload:
   totals, estimated overpaid).
 - `duplicate_batches`, `duplicate_claims`, `weekly`, `anomalies`, `batches` —
   one list of row-dicts per report table. In `weekly`, the DataFrame column
-  `total_claims` is exposed as `invoice_total`, and `mismatch` is cast with
+  `total_claims` is exposed as `invoice_total`, the two duplicate-repayment
+  columns are combined into a single `dup_repaid` field (plus `overpayment`),
+  and `mismatch` is cast with
   `bool(...)` (JSON has no Polars booleans).
 - `claims_by_batch` — a dict `batch_id → list of claim rows`, used by the
   click-a-batch modal. To keep the HTML small, each claim is a **positional
@@ -526,7 +580,9 @@ Header + subtitle, a tile grid (`#tiles`), a chart section, five table sections
 
 ### 7.4 Summary tiles
 
-Reads `DATA.summary`, fills the subtitle and footer, and renders seven tiles.
+Reads `DATA.summary`, fills the subtitle and footer, and renders eight tiles
+(including "Real overpayment (all causes)" — the sum of the weekly
+`overpayment` column).
 Each "problem" tile is classed `bad` (red) when its count is nonzero, `ok`
 (green) when zero.
 
@@ -561,6 +617,8 @@ mutates state and calls `render()`, which redraws the whole table from scratch
 
 The five `makeTable` calls just below configure each section — for example the
 weekly table's Delta column paints the value red when the row is a mismatch,
+its Duplicates-repaid column paints nonzero amounts amber and its
+Real-overpayment column paints anything above a cent red,
 and its Status column renders the reconciled/mismatch pill.
 
 ### 7.6 The batch modal
@@ -585,15 +643,16 @@ A hand-rolled SVG line chart (no library), inside an IIFE:
   value.
 - Draws horizontal gridlines with `$Nk` labels, week labels on the x-axis
   (thinned with a `step` so at most ~10 labels), a solid line for
-  `funding_total`, a dashed line for `invoice_total`, and a red dot on each
-  mismatch week.
+  `funding_total`, a dashed line for `invoice_total`, a red dot on each
+  mismatch week, and an amber dot on each week containing duplicate
+  repayments.
 - The `path()` helper emits an SVG path string, starting a new subpath (`M`
   instead of `L`) after any null gap — so missing weeks show as breaks in the
   line rather than fake connections.
 - A transparent `<rect id="hit">` over the plot area handles `mousemove`: it
   converts the mouse x back to the nearest point index, moves a dashed
   crosshair there, and fills/positions the tooltip (week, funding, invoice,
-  delta — all through `fmtMoney`, so the tooltip also benefits from the
+  delta, duplicates repaid, real overpayment — all through `fmtMoney`, so the tooltip also benefits from the
   negative-zero fix).
 
 ---
@@ -620,11 +679,11 @@ raw and its dashed-date form, so both notations (and partials of either) match
 Run everything:
 
 ```bash
-.venv/bin/python -m unittest discover tests      # 70 Python tests
+.venv/bin/python -m unittest discover tests      # 92 Python tests
 node --test tests/test_report_template.mjs       # 20 JS tests
 ```
 
-### 9.1 `tests/test_parsing.py` (24 tests)
+### 9.1 `tests/test_parsing.py` (31 tests)
 
 Builds **real `.xlsx` files** with openpyxl in temp directories, so the actual
 workbook-reading path runs — no mocks. Helpers `write_funding` / `write_invoice`
@@ -637,9 +696,11 @@ parsing (normal layout, the negative-batch row shift, case-insensitive
 substring marker, empty workbook → nulls); and `load_directory` (routing by
 pattern, week-from-folder-name, case-insensitivity, warning on unrecognized
 xlsx via `assertLogs`, ignoring non-digit folders, `FileNotFoundError` on no
-week folders, empty folders → typed empty frames).
+week folders, empty folders → typed empty frames), and the week-folder date
+validation (wrong length, impossible month/day, future weeks, pre-2015 weeks,
+both boundaries, and the logged warnings for each).
 
-### 9.2 `tests/test_violations.py` (31 tests)
+### 9.2 `tests/test_violations.py` (44 tests)
 
 Uses two builder functions, `claims_df` / `invoices_df`, that take a list of
 partial dicts and fill in defaults — so each test states only what it cares
@@ -649,16 +710,22 @@ math and sort order), duplicate-claim detection (incl. same-batch repeats not
 flagged), weekly reconciliation (both mismatch directions, the exactly-one-cent
 boundary, sub-cent float noise, missing-invoice and missing-claims weeks via
 the `fill_null(True)` path, sorting, one-row-per-week), anomaly labels and
-their precedence ladder, and batch summaries.
+their precedence ladder, and batch summaries. `DuplicateRepaymentTests` and
+`WeeklyOverpaymentTests` cover the real-overpayment path: attribution to the
+re-occurrence week only, third occurrences, same-batch repeats not counted,
+the anti-join double-counting guard, overpayment = delta + duplicates,
+duplicates hiding inside a "reconciled" week, negative-delta offsets, and
+missing-invoice weeks counting duplicates alone.
 
-### 9.3 `tests/test_report.py` (15 tests)
+### 9.3 `tests/test_report.py` (17 tests)
 
 `RoundTests` pins down `_round`, checking negative zero with
 `math.copysign(1.0, x)` — the only reliable way, since `-0.0 == 0.0` is `True`
 in Python. `PayloadDeltaTests` runs `build_payload`/`render_report` on
 synthetic frames: the `0.1 + 0.2` vs `0.3` week must produce a *positive* zero
 delta and no `"delta":-0.0` anywhere in the rendered HTML; genuine ±deltas
-survive; missing weeks give null deltas.
+survive; missing weeks give null deltas. Two further tests pin the payload's
+`dup_repaid`/`overpayment` fields and the `total_overpayment` summary figure.
 
 ### 9.4 `tests/test_report_template.mjs` (20 tests)
 
